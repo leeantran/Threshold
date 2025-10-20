@@ -1,0 +1,2081 @@
+---
+title: "Tay chân miệng - Mô phỏng"
+format: docx
+---
+
+```{r}
+library(readxl)
+library(tidyr)
+library(dplyr)
+library(MASS)
+library(ggplot2)
+library(surveillance)
+library(knitr)
+library(future)
+library(furrr)
+library(purrr)
+
+getmu <- function(t, theta, beta, m, gamma1, gamma2) {
+  mu <- sapply(t, FUN = function(x) {
+    exp(theta + beta * x + I(m > 0) * (sum(gamma1 * cos(2 * pi * x * (1:m)/ 52)) + sum(gamma2 * sin(2 * pi * x * (1:m)/ 52))))
+  })
+  return(mu)
+}
+
+getsd <- function(mu, phi) {
+  sd <- sqrt(mu + ((mu^2)/phi))
+  return(sd)
+}
+
+getmusd <- function(t_current, theta, beta, m, gamma1, gamma2, phi) {
+  out <- data.frame(t = 1:max(t_current)) |> 
+    mutate(week = ifelse(t %% 52 == 0, 52, t %% 52),
+           year = ceiling(t/52),
+           mu = getmu(t = t, theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2),
+           sd = getsd(mu = mu, phi = phi))
+  return(out)
+}
+
+outbreaksim2 <- function(k, t_range, sd, weeks_to_peak = 2, meanlog = 0, sdlog = 0.5) {
+  ti <- sample(x = t_range, size = 1, replace = FALSE)
+  obs <- sapply(k, function(x) {rpois(n = 1, lambda = x * sd[ti])})
+  ob_case <- lapply(obs, function(x){
+    if (x > 0) {
+      cln <- rlnorm(n = x, meanlog = meanlog, sdlog = sdlog) * weeks_to_peak/exp(-0.5^2)
+      output <- data.frame(table(ceiling(cln))) |> 
+        setNames(c("t", "n_ob")) |> 
+        mutate(t = (ti - 1 + as.numeric(t)))
+    } else {
+      output <- NULL
+    }
+    return(output)
+  })
+  ob_sum <- do.call(rbind, lapply(1:length(k), function(x){
+    if (is.null(ob_case[[x]])) {
+      output <- data.frame(k = k[x], t_start = ti, t_stop = NA, t_peak = NA, n_total = obs[x], full = NA)
+    } else {
+      output <- data.frame(k = k[x], t_start = ti, t_stop = last(ob_case[[x]]$t), t_peak = ob_case[[x]]$t[which.max(ob_case[[x]]$n_ob)], n_total = obs[x]) |> 
+        mutate(full = ifelse(t_stop > max(t_range), 0, 1))
+    }
+    return(output)
+  }))
+  ob_case_obs <- do.call(rbind, lapply(1:length(k), function(x){
+    if (is.null(ob_case[[x]])) {
+      output <- data.frame(t = t_range, k = k[x], n_ob = 0)
+    } else {
+      output <- merge(data.frame(t = t_range), ob_case[[x]], by = "t", all.x = TRUE) |> 
+        mutate(n_ob = ifelse(is.na(n_ob), 0, n_ob), k = k[x]) |> 
+        dplyr::select(t, k, n_ob)
+    }
+    return(output)
+  }))
+  return(list(ob_case_obs = ob_case_obs, ob_sum = ob_sum))
+}
+
+get_pod1w <- function(run_algoii) {
+  if (class(run_algoii) == "survRes") {
+    state <- run_algoii$disProgObj$state[run_algoii$control$range]
+    t_outbreak <- ifelse(any(state == 1), min(which(state == 1)), NA)
+    t_alarm <- which(run_algoii$alarm == 1)
+  } else {
+    if (class(run_algoii) == "sts") {
+      state <- as.vector(run_algoii@state)
+      t_outbreak <- ifelse(any(state == 1), min(which(state == 1)), NA)
+      t_alarm <- which(as.numeric(run_algoii@alarm) == 1)
+    }
+  }
+  output <- ifelse(is.na(t_outbreak), NA, ifelse(length(t_alarm) == 0, 0, ifelse(t_outbreak %in% t_alarm, 1, 0)))
+  return(output)
+}
+
+get_perf <- function(run_algo) {
+  k <- do.call(rbind, lapply(names(run_algo), function(x){
+    tmp <- strsplit(x, split = "[.]")
+    return(data.frame(k1 = as.numeric(tmp[[1]][1]), k2 = as.numeric(tmp[[1]][2])))
+  }))
+  algo_perf <- do.call(rbind, lapply(1:length(run_algo), function(x){
+    tmp <- algo.compare(run_algo[[x]])
+    pod1w <- sapply(run_algo[[x]], get_pod1w)
+    out <- data.frame(k1 = k$k1[x], k2 = k$k2[x], method = rownames(tmp), 
+                      apply(tmp, 2, function(x) as.numeric(unlist(x))),
+                      pod1w = pod1w)
+    return(out)
+  }))
+  return(algo_perf)
+}
+
+get_perf2 <- function(run_algo) {
+  k <- do.call(rbind, lapply(names(run_algo), function(x){
+    tmp <- strsplit(x, split = "[.]")
+    return(data.frame(k1 = as.numeric(tmp[[1]][1]), k2 = as.numeric(tmp[[1]][2])))
+  }))
+  algo_perf <- do.call(rbind, lapply(1:length(run_algo), function(x){
+    tmp <- do.call(rbind, lapply(run_algo[[x]], function(y){ algo.quality(y) }))
+    pod1w <- sapply(run_algo[[x]], get_pod1w)
+    out <- data.frame(k1 = k$k1[x], k2 = k$k2[x], method = rownames(tmp), 
+                      apply(tmp, 2, function(x) as.numeric(unlist(x))),
+                      pod1w = pod1w)
+    return(out)
+  }))
+  return(algo_perf)
+}
+
+my_farrington <- function(data, range, b = 5, w = 3, reweight = TRUE, verbose = FALSE, alpha = 0.05, trend = TRUE) {
+  if (class(data) == "disProg") {data <- disProg2sts(data)}
+  ctrl <- list(range = range, b = b, w = w, reweight = reweight, verbose = verbose, alpha = alpha, trend = trend,
+               weightsTreshold = 2.58,
+               thresholdMethod = "nbPlugin")
+  farringtonFlexible(data, control = ctrl)
+}
+my_earsC1 <- function(data, range, method = "C1", baseline = 4, alpha = 0.05) {
+  if (class(data) == "disProg") {data <- disProg2sts(data)}
+  ctrl <- list(range = range, method = method, baseline = baseline, alpha = alpha)
+  earsC(data, control = ctrl)
+} 
+my_earsC2 <- function(data, range, method = "C2", baseline = 4, alpha = 0.05) {
+  if (class(data) == "disProg") {data <- disProg2sts(data)}
+  ctrl <- list(range = range, method = method, baseline = baseline, alpha = alpha)
+  earsC(data, control = ctrl)
+} 
+my_earsC3 <- function(data, range, method = "C3", baseline = 4, alpha = 0.05) {
+  if (class(data) == "disProg") {data <- disProg2sts(data)}
+  ctrl <- list(range = range, method = method, baseline = baseline, alpha = alpha)
+  earsC(data, control = ctrl)
+} 
+
+# Hàm chạy một mô phỏng duy nhất 
+# @return Trả về một list chứa 2 phần: $perf (kết quả) và $data (dữ liệu mô phỏng)
+run_single_simul <- function(sim_id, t_current, t_outbreak_bsl,
+                             theta, beta, m, gamma1, gamma2, phi, k1, k2,
+                             weeks_to_peak, meanlog, sdlog,
+                             algo_ctrl, dat_musd) {
+  
+  baseline_split_i <- dat_musd
+  ob_baseline <- outbreaksim2(k = k1, t_range = t_outbreak_bsl, sd = baseline_split_i$sd, weeks_to_peak = weeks_to_peak, meanlog = meanlog, sdlog = sdlog)
+  ob_current <- outbreaksim2(k = k2, t_range = t_current, sd = baseline_split_i$sd, weeks_to_peak = weeks_to_peak, meanlog = meanlog, sdlog = sdlog)
+  baseline_split_i$n0 <- rnbinom(n = nrow(baseline_split_i), size = phi, mu = baseline_split_i$mu)
+  
+  simdatai <- expand.grid(t = 1:max(t_current), k1 = k1, k2 = k2) %>%
+    left_join(baseline_split_i, by = "t") %>%
+    left_join(ob_baseline$ob_case_obs %>% dplyr::rename(k1 = k, n_ob1 = n_ob), by = c("t", "k1")) %>%
+    left_join(ob_current$ob_case_obs %>% dplyr::rename(k2 = k, n_ob2 = n_ob), by = c("t", "k2")) %>%
+    mutate(n_ob1 = ifelse(is.na(n_ob1), 0, n_ob1), n_ob2 = ifelse(is.na(n_ob2), 0, n_ob2),
+           n_ob = n_ob1 + n_ob2, n = n0 + n_ob, outbreak = ifelse(n_ob > 0, 1, 0)) %>%
+    dplyr::select(k1, k2, t, week, year, mu, sd, n0, n_ob, n, outbreak) %>%
+    dplyr::arrange(k1, k2, t)
+  
+  simdatai_list <- split(simdatai, ~ k1 + k2)
+  simdatai_disProg <- lapply(simdatai_list, function(x) {sts2disProg(sts(observed = x$n, state = x$outbreak, start = c(2018, 1), frequency = 52))})
+  
+  run_algoi <- lapply(simdatai_disProg, function(x) { algo.call(x, control = algo_ctrl) })
+  algo_perfi <- get_perf(run_algoi)
+  
+  algo_perfi_all <- algo_perfi %>%
+    left_join(ob_baseline$ob_sum %>% dplyr::rename(k1 = k, t_start1 = t_start, t_stop1 = t_stop, t_peak1 = t_peak, n_total1 = n_total, full1 = full), by = "k1") %>%
+    left_join(ob_current$ob_sum %>% dplyr::rename(k2 = k, t_start2 = t_start, t_stop2 = t_stop, t_peak2 = t_peak, n_total2 = n_total, full2 = full), by = "k2")
+  
+  # Thêm cột sim_id vào dữ liệu để phân biệt các lần chạy
+  simdatai$sim <- sim_id
+  
+  # Thay đổi cốt lõi: Trả về một list chứa cả kết quả và dữ liệu
+  return(list(
+    perf = cbind(sim = sim_id, algo_perfi_all),
+    data = simdatai
+  ))
+}
+
+# Hàm chạy mô phỏng song song
+# @return Trả về một list chứa 3 phần: $params, $perf_comb, và $sim_data
+simul_parallel <- function(t_current, t_outbreak_bsl,
+                           theta, beta, m, gamma1, gamma2, phi, k1, k2,
+                           weeks_to_peak = 2, meanlog = 0, sdlog = 0.5,
+                           algo_ctrl, nsim, seed) {
+  set.seed(seed)
+  dat_musd <- getmusd(t_current = t_current, theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, phi = phi)
+  
+  cat("Bắt đầu chạy", nsim, "mô phỏng song song cho simul()...\n")
+  
+  # Thay đổi 1: Dùng future_map() thay vì future_map_dfr() để nhận list kết quả
+  results_list <- future_map(
+    .x = 1:nsim,
+    .f = ~ run_single_simul(sim_id = .x, t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+                            theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, phi = phi,
+                            k1 = k1, k2 = k2, weeks_to_peak = weeks_to_peak, meanlog = meanlog,
+                            sdlog = sdlog, algo_ctrl = algo_ctrl, dat_musd = dat_musd),
+    .options = furrr_options(seed = TRUE), .progress = TRUE
+  )
+  cat("Hoàn thành mô phỏng simul().\n")
+  
+  # Thay đổi 2: Tách list kết quả thành 2 dataframe riêng biệt
+  perf_comb <- map_dfr(results_list, "perf")
+  sim_data <- map_dfr(results_list, "data")
+  
+  # Thay đổi 3: Trả về cả dataframe dữ liệu mô phỏng
+  return(list(params = list(t_current = t_current, t_outbreak_bsl = t_outbreak_bsl, theta = theta, beta = beta,
+                            m = m, gamma1 = gamma1, gamma2 = gamma2, phi = phi, k1 = k1, k2 = k2,
+                            weeks_to_peak = weeks_to_peak, meanlog = meanlog, sdlog = sdlog,
+                            algo_ctrl = algo_ctrl, nsim = nsim),
+              perf_comb = perf_comb,
+              sim_data = sim_data)) # DỮ LIỆU MÔ PHỎNG
+}
+
+run_single_simul2 <- function(sim_id, t_current, t_outbreak_bsl,
+                              theta, beta, m, gamma1, gamma2, phi, k1, k2,
+                              weeks_to_peak, meanlog, sdlog, dat_musd) {
+  
+  baseline_split_i <- dat_musd
+  ob_baseline <- outbreaksim2(k = k1, t_range = t_outbreak_bsl, sd = baseline_split_i$sd, weeks_to_peak = weeks_to_peak, meanlog = meanlog, sdlog = sdlog)
+  ob_current <- outbreaksim2(k = k2, t_range = t_current, sd = baseline_split_i$sd, weeks_to_peak = weeks_to_peak, meanlog = meanlog, sdlog = sdlog)
+  baseline_split_i$n0 <- rnbinom(n = nrow(baseline_split_i), size = phi, mu = baseline_split_i$mu)
+  
+  simdatai <- expand.grid(t = 1:max(t_current), k1 = k1, k2 = k2) %>%
+    left_join(baseline_split_i, by = "t") %>%
+    left_join(ob_baseline$ob_case_obs %>% dplyr::rename(k1 = k, n_ob1 = n_ob), by = c("t", "k1")) %>%
+    left_join(ob_current$ob_case_obs %>% dplyr::rename(k2 = k, n_ob2 = n_ob), by = c("t", "k2")) %>%
+    mutate(n_ob1 = ifelse(is.na(n_ob1), 0, n_ob1), n_ob2 = ifelse(is.na(n_ob2), 0, n_ob2),
+           n_ob = n_ob1 + n_ob2, n = n0 + n_ob, outbreak = ifelse(n_ob > 0, 1, 0)) %>%
+    dplyr::select(k1, k2, t, week, year, mu, sd, n0, n_ob, n, outbreak) %>%
+    dplyr::arrange(k1, k2, t)
+  
+  simdatai_list <- split(simdatai, ~ k1 + k2)
+  simdatai_disProg <- lapply(simdatai_list, function(x) {sts2disProg(sts(observed = x$n, state = x$outbreak, start = c(2018, 1), frequency = 52))})
+  
+  run_algoi <- lapply(simdatai_disProg, function(x){
+    list(farringtonf = my_farrington(data = x, range = t_current),
+         earsC1 = my_earsC1(data = x, range = t_current),
+         earsC2 = my_earsC2(data = x, range = t_current),
+         earsC3 = my_earsC3(data = x, range = t_current))
+  })
+  
+  algo_perfi <- get_perf2(run_algoi)
+  
+  algo_perfi_all <- algo_perfi %>%
+    left_join(ob_baseline$ob_sum %>% dplyr::rename(k1 = k, t_start1 = t_start, t_stop1 = t_stop, t_peak1 = t_peak, n_total1 = n_total, full1 = full), by = "k1") %>%
+    left_join(ob_current$ob_sum %>% dplyr::rename(k2 = k, t_start2 = t_start, t_stop2 = t_stop, t_peak2 = t_peak, n_total2 = n_total, full2 = full), by = "k2")
+  
+  simdatai$sim <- sim_id
+  
+  return(list(
+    perf = cbind(sim = sim_id, algo_perfi_all),
+    data = simdatai
+  ))
+}
+
+
+simul2_parallel <- function(t_current, t_outbreak_bsl,
+                            theta, beta, m, gamma1, gamma2, phi, k1, k2,
+                            weeks_to_peak = 2, meanlog = 0, sdlog = 0.5,
+                            nsim, seed) {
+  set.seed(seed)
+  dat_musd <- getmusd(t_current = t_current, theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, phi = phi)
+  
+  cat("Bắt đầu chạy", nsim, "mô phỏng song song cho simul2()...\n")
+  
+  results_list <- future_map(
+    .x = 1:nsim,
+    .f = ~ run_single_simul2(sim_id = .x, t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+                             theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, phi = phi,
+                             k1 = k1, k2 = k2, weeks_to_peak = weeks_to_peak, meanlog = meanlog,
+                             sdlog = sdlog, dat_musd = dat_musd),
+    .options = furrr_options(seed = TRUE), .progress = TRUE
+  )
+  cat("Hoàn thành mô phỏng simul2().\n")
+  
+  perf_comb <- map_dfr(results_list, "perf")
+  sim_data <- map_dfr(results_list, "data")
+  
+  return(list(params = list(t_current = t_current, t_outbreak_bsl = t_outbreak_bsl, theta = theta, beta = beta,
+                            m = m, gamma1 = gamma1, gamma2 = gamma2, phi = phi, k1 = k1, k2 = k2,
+                            weeks_to_peak = weeks_to_peak, meanlog = meanlog, sdlog = sdlog,
+                            nsim = nsim),
+              perf_comb = perf_comb,
+              sim_data = sim_data)) # DỮ LIỆU MÔ PHỎNG
+}
+```
+
+```{r}
+plan(multisession)
+```
+
+```{r}
+nsim <- 100
+t_current <- 313:364 
+t_outbreak_bsl <- 105:156 
+k1 <- c(3,5,7)
+k2 <- c(6,8,10)
+
+algo_ctrl <- list(
+  list(funcName = "farrington", range = t_current, b = 5, w = 1, reweight = TRUE, verbose = FALSE, alpha = 0.05, trend = TRUE),
+  list(funcName = "cdc", range = t_current, b = 5, m = 1, alpha = 0.025),
+  list(funcName = "cusum", range = t_current, k = 1.04, h = 2.26, m = NULL, trans = "standard"),
+  list(funcName = "cusum", range = t_current, k = 1.04, h = 2.26, m = NULL, trans = "rossi"),
+  list(funcName = "cusum", range = t_current, k = 1.04, h = 2.26, m = NULL, trans = "pearsonNegBin"),
+  list(funcName = "rki1", range = t_current, b = 5, w = 1),
+  list(funcName = "rki2", range = t_current, b = 5, w = 1),
+  list(funcName = "bayes1", range = t_current, b = 5, w = 1),
+  list(funcName = "bayes2", range = t_current, b = 5, w = 1),
+  list(funcName = "glrnb", range = t_current, c.ARL = 5,
+       alpha = 0.2),
+  list(funcName = "glrpois", range = t_current, c.ARL = 5)
+)
+```
+
+## Sce 1
+
+```{r}
+theta <- 6
+beta <- -0.001
+gamma1 <- -0.6
+gamma2 <- -0.5
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 2
+
+```{r}
+theta <- 8
+beta <- -0.001
+gamma1 <- -0.6
+gamma2 <- -0.5
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 3
+
+```{r}
+theta <- 6
+beta <- 0.001
+gamma1 <- -0.6
+gamma2 <- -0.5
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 4
+
+```{r}
+theta <- 8
+beta <- 0.001
+gamma1 <- -0.6
+gamma2 <- -0.5
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 5
+
+```{r}
+theta <- 6
+beta <- -0.001
+gamma1 <- -0.7
+gamma2 <- -0.5
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 6
+
+```{r}
+theta <- 8
+beta <- -0.001
+gamma1 <- -0.7
+gamma2 <- -0.5
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 7
+
+```{r}
+theta <- 6
+beta <- 0.001
+gamma1 <- -0.7
+gamma2 <- -0.5
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 8
+
+```{r}
+theta <- 6
+beta <- 0.001
+gamma1 <- -0.7
+gamma2 <- -0.5
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 9
+
+```{r}
+theta <- 6
+beta <- -0.001
+gamma1 <- -0.6
+gamma2 <- -0.7
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 10
+
+```{r}
+theta <- 8
+beta <- -0.001
+gamma1 <- -0.6
+gamma2 <- -0.7
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 11
+
+```{r}
+theta <- 6
+beta <- 0.001
+gamma1 <- -0.6
+gamma2 <- -0.7
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 12
+
+```{r}
+theta <- 8
+beta <- 0.001
+gamma1 <- -0.6
+gamma2 <- -0.7
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 13
+
+```{r}
+theta <- 6
+beta <- -0.001
+gamma1 <- -0.7
+gamma2 <- -0.7
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 14
+
+```{r}
+theta <- 8
+beta <- -0.001
+gamma1 <- -0.7
+gamma2 <- -0.7
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 15
+
+```{r}
+theta <- 6
+beta <- 0.001
+gamma1 <- -0.7
+gamma2 <- -0.7
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 16
+
+```{r}
+theta <- 8
+beta <- 0.001
+gamma1 <- -0.7
+gamma2 <- -0.7
+m <- 1
+phi <- 7
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 17
+
+```{r}
+theta <- 6
+beta <- -0.001
+gamma1 <- -0.6
+gamma2 <- -0.5
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 18
+
+```{r}
+theta <- 8
+beta <- -0.001
+gamma1 <- -0.6
+gamma2 <- -0.5
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 19
+
+```{r}
+theta <- 6
+beta <- 0.001
+gamma1 <- -0.6
+gamma2 <- -0.5
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 20
+
+```{r}
+theta <- 8
+beta <- 0.001
+gamma1 <- -0.6
+gamma2 <- -0.5
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 21
+
+```{r}
+theta <- 6
+beta <- -0.001
+gamma1 <- -0.7
+gamma2 <- -0.5
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 22
+
+```{r}
+theta <- 8
+beta <- -0.001
+gamma1 <- -0.7
+gamma2 <- -0.5
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 23
+
+```{r}
+theta <- 6
+beta <- 0.001
+gamma1 <- -0.7
+gamma2 <- -0.5
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 24
+
+```{r}
+theta <- 6
+beta <- 0.001
+gamma1 <- -0.7
+gamma2 <- -0.5
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 25
+
+```{r}
+theta <- 6
+beta <- -0.001
+gamma1 <- -0.6
+gamma2 <- -0.7
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 26
+
+```{r}
+theta <- 8
+beta <- -0.001
+gamma1 <- -0.6
+gamma2 <- -0.7
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 27
+
+```{r}
+theta <- 6
+beta <- 0.001
+gamma1 <- -0.6
+gamma2 <- -0.7
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 28
+
+```{r}
+theta <- 8
+beta <- 0.001
+gamma1 <- -0.6
+gamma2 <- -0.7
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 29
+
+```{r}
+theta <- 6
+beta <- -0.001
+gamma1 <- -0.7
+gamma2 <- -0.7
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 30
+
+```{r}
+theta <- 8
+beta <- -0.001
+gamma1 <- -0.7
+gamma2 <- -0.7
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 31
+
+```{r}
+theta <- 6
+beta <- 0.001
+gamma1 <- -0.7
+gamma2 <- -0.7
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
+
+## Sce 32
+
+```{r}
+theta <- 8
+beta <- 0.001
+gamma1 <- -0.7
+gamma2 <- -0.7
+m <- 1
+phi <- 9
+
+test1_optimized <- simul_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2, 
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  algo_ctrl = algo_ctrl,
+  nsim = nsim, 
+  seed = 5)
+
+kable(test1_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+test2_optimized <- simul2_parallel(
+  t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
+  theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
+  phi = phi, k1 = k1, k2 = k2,
+  weeks_to_peak = 10, meanlog = 0, sdlog = 0.5,
+  nsim = nsim,
+  seed = 5)
+
+kable(test2_optimized$perf_comb %>% 
+        group_by(method, k1, k2) %>%
+        summarise(
+          spec = mean(spec, na.rm = T),
+          sens = mean(sens, na.rm = T),
+          fpr = 1 - mean(spec, na.rm = T),
+          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
+          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
+          pod1w = mean(pod1w, na.rm = T),
+          .groups = "drop"
+        ))
+
+### Đóng các session nền sau khi chạy
+plan(sequential)
+```
