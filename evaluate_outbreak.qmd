@@ -1,0 +1,586 @@
+---
+title: "Đánh giá năm dịch và năm không dịch"
+format: docx
+
+---
+
+```{r}
+#| message: false
+#| warning: false
+
+source("functions.R")
+```
+
+## Load data
+
+```{r}
+sxh_tp <- load_data("https://docs.google.com/spreadsheets/d/1TefEasY2RvEZcJvYqRwCXOg8e4aFtaf_0v5Gc6ftr-o/edit?usp=sharing",
+                     sheet = "sxh_tp")
+
+sxh_qh <- load_data("https://docs.google.com/spreadsheets/d/1TefEasY2RvEZcJvYqRwCXOg8e4aFtaf_0v5Gc6ftr-o/edit?usp=sharing",
+                     sheet = "sxh_qh")
+
+tcm_tp <- load_data("https://docs.google.com/spreadsheets/d/1TefEasY2RvEZcJvYqRwCXOg8e4aFtaf_0v5Gc6ftr-o/edit?usp=sharing",
+                     sheet = "tcm_tp")
+
+tcm_qh <- load_data("https://docs.google.com/spreadsheets/d/1TefEasY2RvEZcJvYqRwCXOg8e4aFtaf_0v5Gc6ftr-o/edit?usp=sharing",
+                     sheet = "tcm_qh")
+
+## Population density
+pop <- load_data("https://docs.google.com/spreadsheets/d/1sQ1bWkLqF136PO5MfjtRCB9q0d_Krew54AM7sX69Pr4/edit?usp=sharing", sheet = "Tổng")
+```
+
+## Dengue - City
+
+```{r}
+#| message: false
+#| warning: false
+rs2018 <- run_algos_city(sxh_tp, 2018)
+rs2019 <- run_algos_city(sxh_tp, 2019)
+rs2020 <- run_algos_city(sxh_tp, 2020)
+rs2022 <- run_algos_city(sxh_tp, 2022)
+rs2023 <- run_algos_city(sxh_tp, 2023)
+rs2024 <- run_algos_city(sxh_tp, 2024)
+
+all_res <- bind_rows(rs2018, rs2019, rs2020, rs2022, rs2023, rs2024)
+
+summary_alarms <- all_res %>%
+  pivot_longer(
+    cols = starts_with("ub_"), 
+    names_to = "algorithm", 
+    values_to = "threshold"
+  ) %>%
+  mutate(is_alarm = if_else(!is.na(threshold) & cases >= threshold, 1, 0)) %>%
+  group_by(year, algorithm) %>%
+  summarise(total_weeks_alarm = sum(is_alarm), .groups = "drop") %>%
+  mutate(algorithm = str_remove(algorithm, "ub_")) %>%
+  pivot_wider(
+    names_from = algorithm, 
+    values_from = total_weeks_alarm
+  )  
+```
+
+```{r}
+#| message: false
+#| warning: false
+all_res_long <- all_res %>% 
+  pivot_longer(cols = 5:23,
+               values_to = "values",
+               names_to = "variables")
+
+labels <- c(
+  "ub_cdc" = "CDC",
+  "ub_rki1" = "RKI1",
+  "ub_rki2" = "RKI2",
+  "ub_bayes1" = "Bayes1",
+  "ub_bayes2" = "Bayes2",
+  "ub_far_old" = "Farrington",
+  "ub_far_flex" = "Farrington Flexible",
+  "ub_earsC1" = "EARS C1",
+  "ub_earsC2" = "EARS C2",
+  "ub_earsC3" = "EARS C3",
+  "ub_glrnb" = "GLR Negbin",
+  "ub_glrpois" = "GLR Poisson",
+  "ub_cusum" = "CUSUM",
+  "ub_cusum_rossi" = "CUSUM Rossi",
+  "ub_cusum_rossiGLM" = "CUSUM Rossi fit GLM",
+  "ub_cusum_negbin" = "CUSUM Negbin",
+  "ub_cusum_negbinGLM" = "CUSUM Negbin fit GLM",
+  "ub_serfling" = "Serfling",
+  "ub_mem" = "MEM"
+)
+
+pdf("charts_dengue.pdf", width = 15, height = 10)
+
+unique_years <- unique(all_res_long$year)
+
+for (y in unique_years) {
+  p <- all_res_long %>% 
+    filter(year == y) %>% 
+    ggplot(aes(x = week)) +
+    geom_col(aes(y = cases), fill = "grey80", width = 1) +
+    geom_line(aes(y = values), color = "red") +
+    facet_wrap(~variables,
+               labeller = labeller(variables = labels),
+               scales = "free_y") +
+    theme_bw() +
+    theme(strip.background = element_rect(fill = "lightblue"),
+          axis.text = element_text(color = "black")) +
+    labs(x = "Weeks", y = "Cases", title = paste("Year:", y))
+  
+  print(p)
+}
+
+dev.off()
+```
+
+## Dengue - Districts
+
+```{r}
+d2018 <- run_algos_by_district(sxh_qh, 2018)
+d2019 <- run_algos_by_district(sxh_qh, 2019)
+d2020 <- run_algos_by_district(sxh_qh, 2020)
+d2022 <- run_algos_by_district(sxh_qh, 2022)
+d2023 <- run_algos_by_district(sxh_qh, 2023)
+d2024 <- run_algos_by_district(sxh_qh, 2024)
+
+all_res_districts <- bind_rows(d2018, d2019, d2020, d2022, d2023, d2024)
+
+summary_alarms_districts <- all_res_districts %>%
+  pivot_longer(
+    cols = starts_with("ub_"), 
+    names_to = "algorithm", 
+    values_to = "threshold"
+  ) %>%
+  mutate(is_alarm = if_else(!is.na(threshold) & cases >= threshold, 1, 0)) %>%
+  group_by(year, districts, algorithm) %>% 
+  summarise(total_weeks_alarm = sum(is_alarm, na.rm = TRUE), .groups = "drop")
+
+summary_alarms_districts <- summary_alarms_districts %>% 
+    mutate(districts = recode(districts,
+    "bc"   = "Bình Chánh",
+    "bt"   = "Bình Thạnh",
+    "bta"  = "Bình Tân",
+    "cc"   = "Củ Chi",
+    "cg"   = "Cần Giờ",
+    "gv"   = "Gò Vấp",
+    "hm"   = "Hóc Môn",
+    "nb"   = "Nhà Bè",
+    "pn"   = "Phú Nhuận",
+    "q1"   = "Quận 1",
+    "q10"  = "Quận 10",
+    "q11"  = "Quận 11",
+    "q12"  = "Quận 12",
+    "q3"   = "Quận 3",
+    "q4"   = "Quận 4",
+    "q5"   = "Quận 5",
+    "q6"   = "Quận 6",
+    "q7"   = "Quận 7",
+    "q8"   = "Quận 8",
+    "tb"   = "Tân Bình",
+    "tp"   = "Tân Phú",
+    "tptd" = "Thành phố Thủ Đức"
+  ))
+```
+
+```{r}
+pop_2018 <- pop %>% 
+  filter(year == 2019) %>% 
+  mutate(year = 2018)
+
+pop_2022 <- pop %>% 
+  filter(year == 2023) %>% 
+  mutate(year = 2022)
+
+pop_final <- bind_rows(pop, pop_2018, pop_2022) %>% 
+  arrange(districts, year)
+```
+
+```{r}
+df_final <- summary_alarms_districts %>%
+  left_join(pop_final, by = c("year", "districts"))
+
+labels <- c(
+  "ub_cdc" = "CDC",
+  "ub_rki1" = "RKI1",
+  "ub_rki2" = "RKI2",
+  "ub_bayes1" = "Bayes1",
+  "ub_bayes2" = "Bayes2",
+  "ub_far_old" = "Farrington",
+  "ub_far_flex" = "Farrington Flexible",
+  "ub_earsC1" = "EARS C1",
+  "ub_earsC2" = "EARS C2",
+  "ub_earsC3" = "EARS C3",
+  "ub_glrnb" = "GLR Negbin",
+  "ub_glrpois" = "GLR Poisson",
+  "ub_cusum" = "CUSUM",
+  "ub_cusum_rossi" = "CUSUM Rossi",
+  "ub_cusum_rossiGLM" = "CUSUM Rossi fit GLM",
+  "ub_cusum_negbin" = "CUSUM Negbin",
+  "ub_cusum_negbinGLM" = "CUSUM Negbin fit GLM",
+  "ub_serfling" = "Serfling",
+  "ub_mem" = "MEM"
+)
+
+df_final <- df_final %>%
+  mutate(dist_abbr = case_match(districts,
+  
+    "Quận 1" ~ "Q1", "Quận 3" ~ "Q3", "Quận 4" ~ "Q4", 
+    "Quận 5" ~ "Q5", "Quận 6" ~ "Q6", "Quận 7" ~ "Q7", 
+    "Quận 8" ~ "Q8", "Quận 10" ~ "Q10", "Quận 11" ~ "Q11", 
+    "Quận 12" ~ "Q12",
+    
+    "Bình Thạnh" ~ "BT",
+    "Bình Tân"   ~ "BTA",
+    "Gò Vấp"     ~ "GV",
+    "Phú Nhuận"  ~ "PN",
+    "Tân Bình"   ~ "TB",
+    "Tân Phú"    ~ "TP",
+    "Thành phố Thủ Đức" ~ "TD",
+    
+    # Nhóm Huyện
+    "Bình Chánh" ~ "BC",
+    "Cần Giờ"    ~ "CG",
+    "Củ Chi"     ~ "CC",
+    "Hóc Môn"    ~ "HM",
+    "Nhà Bè"     ~ "NB"))
+
+pdf("charts_dengue_districts.pdf", width = 15, height = 10)
+
+unique_years <- unique(df_final$year)
+
+for (y in unique_years) {
+  
+  p <- df_final %>% 
+    filter(year == y) %>% 
+    ggplot(aes(x = popd, y = total_weeks_alarm)) +
+    geom_point(color = "firebrick", alpha = 0.7, size = 1.5) +
+    geom_text_repel(aes(label = dist_abbr), 
+                    size = 3,          
+                    box.padding = 0.5, 
+                    max.overlaps = Inf,
+                    segment.size = 0.2,       
+                    segment.color = "grey70", 
+                    segment.alpha = 0.6
+                    ) +
+
+    facet_wrap(~algorithm, scales = "fixed",
+               labeller = labeller(algorithm = labels)) + 
+    
+    scale_x_log10(labels = comma) +
+    
+    theme_bw() +
+    theme(strip.background = element_rect(fill = "lightblue"),
+          axis.text = element_text(color = "black")) +
+
+    labs(x = "Population Density (Logarit)", 
+         y = "Alarm weeks", 
+         title = paste("Year:", y))
+  
+  print(p)
+}
+
+dev.off()
+```
+
+```{r}
+dist_levels <- df_final %>% 
+  filter(year == 2019) %>% 
+  arrange(popd) %>%         
+  pull(dist_abbr) %>%       
+  unique()
+
+df_final$dist_abbr <- factor(df_final$dist_abbr, levels = dist_levels)
+
+pdf("charts_dengue_heatmap.pdf", width = 15, height = 10)
+
+unique_years <- unique(df_final$year)
+
+for (y in unique_years) {
+  
+  data_plot <- df_final %>% filter(year == y)
+  
+  p <- ggplot(data_plot, aes(x = dist_abbr, y = algorithm)) +
+    
+    geom_tile(aes(fill = total_weeks_alarm), color = "white", size = 0.5) +
+    
+    geom_text(aes(label = total_weeks_alarm), size = 3, color = "black") +
+    
+    scale_fill_gradient(low = "#ebf5fb", high = "#c0392b", na.value = "grey90") +
+    
+    scale_y_discrete(labels = labels) +
+    
+    theme_minimal() +
+    labs(x = "Districts (Low to High Population Density)",
+         y = "",
+         fill = "Alarm weeks",
+         title = paste("Year:", y)) +
+    
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 13, color = "black"),
+      axis.text.y = element_text(size = 11, color = "black"),
+      panel.grid = element_blank(), 
+      legend.position = "right"
+    )
+  
+  print(p)
+}
+
+dev.off()
+```
+
+## HFMD - City
+
+```{r}
+c2018 <- run_algos_city(tcm_tp, 2018)
+c2019 <- run_algos_city(tcm_tp, 2019)
+c2020 <- run_algos_city(tcm_tp, 2020)
+c2022 <- run_algos_city(tcm_tp, 2022)
+c2023 <- run_algos_city(tcm_tp, 2023)
+c2024 <- run_algos_city(tcm_tp, 2024)
+
+all_res <- bind_rows(c2018, c2019, c2020, c2022, c2023, c2024)
+
+summary_alarms <- all_res %>%
+  pivot_longer(
+    cols = starts_with("ub_"), 
+    names_to = "algorithm", 
+    values_to = "threshold"
+  ) %>%
+  mutate(is_alarm = if_else(!is.na(threshold) & cases >= threshold, 1, 0)) %>%
+  group_by(year, algorithm) %>%
+  summarise(total_weeks_alarm = sum(is_alarm), .groups = "drop") %>%
+  mutate(algorithm = str_remove(algorithm, "ub_")) %>%
+  pivot_wider(
+    names_from = algorithm, 
+    values_from = total_weeks_alarm
+  )  
+```
+
+```{r}
+all_res_long <- all_res %>% 
+  pivot_longer(cols = 5:23,
+               values_to = "values",
+               names_to = "variables")
+
+labels <- c(
+  "ub_cdc" = "CDC",
+  "ub_rki1" = "RKI1",
+  "ub_rki2" = "RKI2",
+  "ub_bayes1" = "Bayes1",
+  "ub_bayes2" = "Bayes2",
+  "ub_far_old" = "Farrington",
+  "ub_far_flex" = "Farrington Flexible",
+  "ub_earsC1" = "EARS C1",
+  "ub_earsC2" = "EARS C2",
+  "ub_earsC3" = "EARS C3",
+  "ub_glrnb" = "GLR Negbin",
+  "ub_glrpois" = "GLR Poisson",
+  "ub_cusum" = "CUSUM",
+  "ub_cusum_rossi" = "CUSUM Rossi",
+  "ub_cusum_rossiGLM" = "CUSUM Rossi fit GLM",
+  "ub_cusum_negbin" = "CUSUM Negbin",
+  "ub_cusum_negbinGLM" = "CUSUM Negbin fit GLM",
+  "ub_serfling" = "Serfling",
+  "ub_mem" = "MEM"
+)
+
+pdf("charts_hfmd.pdf", width = 15, height = 10)
+
+unique_years <- unique(all_res_long$year)
+
+for (y in unique_years) {
+  p <- all_res_long %>% 
+    filter(year == y) %>% 
+    ggplot(aes(x = week)) +
+    geom_col(aes(y = cases), fill = "grey80", width = 1) +
+    geom_line(aes(y = values), color = "red") +
+    facet_wrap(~variables,
+               labeller = labeller(variables = labels),
+               scales = "free_y") +
+    theme_bw() +
+    theme(strip.background = element_rect(fill = "lightblue"),
+          axis.text = element_text(color = "black")) +
+    labs(x = "Weeks", y = "Cases", title = paste("Year:", y))
+  
+  print(p)
+}
+
+dev.off()
+```
+
+## HFMD - Districts
+
+```{r}
+d2018 <- run_algos_by_district(tcm_qh, 2018)
+d2019 <- run_algos_by_district(tcm_qh, 2019)
+d2020 <- run_algos_by_district(tcm_qh, 2020)
+d2022 <- run_algos_by_district(tcm_qh, 2022)
+d2023 <- run_algos_by_district(tcm_qh, 2023)
+d2024 <- run_algos_by_district(tcm_qh, 2024)
+
+all_res_districts <- bind_rows(d2018, d2019, d2020, d2022, d2023, d2024)
+
+summary_alarms_districts <- all_res_districts %>%
+  pivot_longer(
+    cols = starts_with("ub_"), 
+    names_to = "algorithm", 
+    values_to = "threshold"
+  ) %>%
+  mutate(is_alarm = if_else(!is.na(threshold) & cases >= threshold, 1, 0)) %>%
+  group_by(year, districts, algorithm) %>% 
+  summarise(total_weeks_alarm = sum(is_alarm, na.rm = TRUE), .groups = "drop")
+
+summary_alarms_districts <- summary_alarms_districts %>% 
+    mutate(districts = recode(districts,
+    "bc"   = "Bình Chánh",
+    "bt"   = "Bình Thạnh",
+    "bta"  = "Bình Tân",
+    "cc"   = "Củ Chi",
+    "cg"   = "Cần Giờ",
+    "gv"   = "Gò Vấp",
+    "hm"   = "Hóc Môn",
+    "nb"   = "Nhà Bè",
+    "pn"   = "Phú Nhuận",
+    "q1"   = "Quận 1",
+    "q10"  = "Quận 10",
+    "q11"  = "Quận 11",
+    "q12"  = "Quận 12",
+    "q3"   = "Quận 3",
+    "q4"   = "Quận 4",
+    "q5"   = "Quận 5",
+    "q6"   = "Quận 6",
+    "q7"   = "Quận 7",
+    "q8"   = "Quận 8",
+    "tb"   = "Tân Bình",
+    "tp"   = "Tân Phú",
+    "tptd" = "Thành phố Thủ Đức"
+  ))
+```
+
+```{r}
+pop_2018 <- pop %>% 
+  filter(year == 2019) %>% 
+  mutate(year = 2018)
+
+pop_2022 <- pop %>% 
+  filter(year == 2023) %>% 
+  mutate(year = 2022)
+
+pop_final <- bind_rows(pop, pop_2018, pop_2022) %>% 
+  arrange(districts, year)
+```
+
+```{r}
+df_final <- summary_alarms_districts %>%
+  left_join(pop_final, by = c("year", "districts"))
+
+labels <- c(
+  "ub_cdc" = "CDC",
+  "ub_rki1" = "RKI1",
+  "ub_rki2" = "RKI2",
+  "ub_bayes1" = "Bayes1",
+  "ub_bayes2" = "Bayes2",
+  "ub_far_old" = "Farrington",
+  "ub_far_flex" = "Farrington Flexible",
+  "ub_earsC1" = "EARS C1",
+  "ub_earsC2" = "EARS C2",
+  "ub_earsC3" = "EARS C3",
+  "ub_glrnb" = "GLR Negbin",
+  "ub_glrpois" = "GLR Poisson",
+  "ub_cusum" = "CUSUM",
+  "ub_cusum_rossi" = "CUSUM Rossi",
+  "ub_cusum_rossiGLM" = "CUSUM Rossi fit GLM",
+  "ub_cusum_negbin" = "CUSUM Negbin",
+  "ub_cusum_negbinGLM" = "CUSUM Negbin fit GLM",
+  "ub_serfling" = "Serfling",
+  "ub_mem" = "MEM"
+)
+
+df_final <- df_final %>%
+  mutate(dist_abbr = case_match(districts,
+  
+    "Quận 1" ~ "Q1", "Quận 3" ~ "Q3", "Quận 4" ~ "Q4", 
+    "Quận 5" ~ "Q5", "Quận 6" ~ "Q6", "Quận 7" ~ "Q7", 
+    "Quận 8" ~ "Q8", "Quận 10" ~ "Q10", "Quận 11" ~ "Q11", 
+    "Quận 12" ~ "Q12",
+    
+    "Bình Thạnh" ~ "BT",
+    "Bình Tân"   ~ "BTA",
+    "Gò Vấp"     ~ "GV",
+    "Phú Nhuận"  ~ "PN",
+    "Tân Bình"   ~ "TB",
+    "Tân Phú"    ~ "TP",
+    "Thành phố Thủ Đức" ~ "TD",
+    
+    # Nhóm Huyện
+    "Bình Chánh" ~ "BC",
+    "Cần Giờ"    ~ "CG",
+    "Củ Chi"     ~ "CC",
+    "Hóc Môn"    ~ "HM",
+    "Nhà Bè"     ~ "NB"))
+
+pdf("hfmd_districts_scatter.pdf", width = 15, height = 10)
+
+unique_years <- unique(df_final$year)
+
+for (y in unique_years) {
+  
+  p <- df_final %>% 
+    filter(year == y) %>% 
+    ggplot(aes(x = popd, y = total_weeks_alarm)) +
+    geom_point(color = "firebrick", alpha = 0.7, size = 1.5) +
+    geom_text_repel(aes(label = dist_abbr), 
+                    size = 3,          
+                    box.padding = 0.5, 
+                    max.overlaps = Inf,
+                    segment.size = 0.2,       
+                    segment.color = "grey70", 
+                    segment.alpha = 0.6
+                    ) +
+
+    facet_wrap(~algorithm, scales = "fixed",
+               labeller = labeller(algorithm = labels)) + 
+    
+    scale_x_log10(labels = comma) +
+    
+    theme_bw() +
+    theme(strip.background = element_rect(fill = "lightblue"),
+          axis.text = element_text(color = "black")) +
+
+    labs(x = "Population Density (Logarit)", 
+         y = "Alarm weeks", 
+         title = paste("Year:", y))
+  
+  print(p)
+}
+
+dev.off()
+```
+
+```{r}
+dist_levels <- df_final %>% 
+  filter(year == 2019) %>% 
+  arrange(popd) %>%         
+  pull(dist_abbr) %>%       
+  unique()
+
+df_final$dist_abbr <- factor(df_final$dist_abbr, levels = dist_levels)
+
+pdf("hfmd_districts_heatmap.pdf", width = 15, height = 10)
+
+unique_years <- unique(df_final$year)
+
+for (y in unique_years) {
+  
+  data_plot <- df_final %>% filter(year == y)
+  
+  p <- ggplot(data_plot, aes(x = dist_abbr, y = algorithm)) +
+    
+    geom_tile(aes(fill = total_weeks_alarm), color = "white", size = 0.5) +
+    
+    geom_text(aes(label = total_weeks_alarm), size = 3, color = "black") +
+    
+    scale_fill_gradient(low = "#ebf5fb", high = "#c0392b", na.value = "grey90") +
+    
+    scale_y_discrete(labels = labels) +
+    
+    theme_minimal() +
+    labs(x = "Districts (Low to High Population Density)",
+         y = "",
+         fill = "Alarm weeks",
+         title = paste("Year:", y)) +
+    
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 13, color = "black"),
+      axis.text.y = element_text(size = 11, color = "black"),
+      panel.grid = element_blank(), 
+      legend.position = "right"
+    )
+  
+  print(p)
+}
+
+dev.off()
+```
+

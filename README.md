@@ -4,4 +4,4 @@
 
 2. File `simulation_sxh.qmd` và File `simulation_hfmd.qmd` là bộ code thực hiện mô phỏng dữ liệu.
 
-3. Các File còn lại là bộ code đánh giá các phương pháp trên từng năm dịch của dữ liệu thực tế.
+3. File `functions.R` chứa các function cần thiết để chạy file `evaluate_outbreak.qmd`
