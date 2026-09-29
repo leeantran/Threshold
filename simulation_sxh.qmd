@@ -1,6 +1,10 @@
 ---
 title: "Sốt xuất huyết - Mô phỏng"
 format: docx
+execute:
+  echo: false
+  warning: false
+  message: false
 ---
 
 ```{r}
@@ -301,8 +305,8 @@ plan(multisession)
 nsim <- 100
 t_current <- 313:364 
 t_outbreak_bsl <- 105:156 
-k1 <- c(3,5,7)
-k2 <- c(6,8,10)
+k1 <- c(0,3,5,7)
+k2 <- c(0,6,8,10)
 
 algo_ctrl <- list(
   list(funcName = "farrington", range = t_current, b = 5, w = 1, reweight = TRUE, verbose = FALSE, alpha = 0.05, trend = TRUE),
@@ -314,10 +318,26 @@ algo_ctrl <- list(
   list(funcName = "rki2", range = t_current, b = 5, w = 1),
   list(funcName = "bayes1", range = t_current, b = 5, w = 1),
   list(funcName = "bayes2", range = t_current, b = 5, w = 1),
-  list(funcName = "glrnb", range = t_current, c.ARL = 5,
-       alpha = 0.2),
+  list(funcName = "glrnb", range = t_current, c.ARL = 5),
   list(funcName = "glrpois", range = t_current, c.ARL = 5)
 )
+
+# 1. Tạo 2 list rỗng để hứng dữ liệu qua từng kịch bản
+all_perf_list <- list()
+all_sim_data_list <- list()
+
+# 2. Hàm helper gom dữ liệu (Đã tối ưu)
+save_scenario_results <- function(test1, test2, sce_name) {
+  # BẢNG HIỆU SUẤT: Lấy từ cả 2 test vì chứa các thuật toán khác nhau
+  all_perf_list[[paste0(sce_name, "_test1")]] <<- test1$perf_comb %>% 
+    mutate(scenario = sce_name, test_group = "test1")
+  all_perf_list[[paste0(sce_name, "_test2")]] <<- test2$perf_comb %>% 
+    mutate(scenario = sce_name, test_group = "test2")
+  
+  # BẢNG DỮ LIỆU SỐ CA: Chỉ cần lấy từ test1 là đủ (vì test2 tạo ra cục data y chang)
+  all_sim_data_list[[sce_name]] <<- test1$sim_data %>% 
+    mutate(scenario = sce_name)
+}
 ```
 
 ## Sce 1
@@ -339,18 +359,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -359,17 +367,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 1")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -394,18 +393,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -414,17 +401,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 2")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -449,18 +427,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -469,17 +435,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 3")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -504,18 +461,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -524,17 +469,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 4")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -559,18 +495,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -579,17 +503,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 5")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -614,18 +529,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -634,17 +537,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 6")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -669,18 +563,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -689,17 +571,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 7")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -724,18 +597,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -744,17 +605,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 8")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -779,18 +631,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -799,17 +639,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 9")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -834,18 +665,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -854,17 +673,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 10")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -889,18 +699,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -909,17 +707,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 11")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -944,18 +733,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -964,17 +741,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 12")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -999,18 +767,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1019,17 +775,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 13")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1054,18 +801,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1074,17 +809,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 14")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1109,18 +835,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1129,17 +843,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 15")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1164,18 +869,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1184,17 +877,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 16")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1219,18 +903,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1239,17 +911,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 17")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1274,18 +937,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1294,17 +945,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 18")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1329,18 +971,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1349,17 +979,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 19")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1384,18 +1005,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1404,17 +1013,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 20")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1439,18 +1039,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1459,17 +1047,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 21")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1494,18 +1073,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1514,17 +1081,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 22")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1549,18 +1107,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1569,17 +1115,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 23")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1604,18 +1141,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1624,17 +1149,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 24")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1659,18 +1175,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1679,17 +1183,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 25")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1714,18 +1209,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1734,17 +1217,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 26")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1769,18 +1243,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1789,17 +1251,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 27")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1824,18 +1277,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1844,17 +1285,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 28")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1879,18 +1311,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1899,17 +1319,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 29")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1934,18 +1345,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -1954,17 +1353,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 30")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -1989,18 +1379,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -2009,17 +1387,8 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 31")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
@@ -2044,18 +1413,6 @@ test1_optimized <- simul_parallel(
   nsim = nsim, 
   seed = 5)
 
-kable(test1_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
-
 test2_optimized <- simul2_parallel(
   t_current = t_current, t_outbreak_bsl = t_outbreak_bsl,
   theta = theta, beta = beta, m = m, gamma1 = gamma1, gamma2 = gamma2,
@@ -2064,18 +1421,26 @@ test2_optimized <- simul2_parallel(
   nsim = nsim,
   seed = 5)
 
-kable(test2_optimized$perf_comb %>% 
-        group_by(method, k1, k2) %>%
-        summarise(
-          spec = mean(spec, na.rm = T),
-          sens = mean(sens, na.rm = T),
-          fpr = 1 - mean(spec, na.rm = T),
-          ppv = mean(ifelse((TP + FP) > 0, TP / (TP + FP), NA_real_), na.rm = T),
-          npv = mean(ifelse((TN + FN) > 0, TN / (TN + FN), NA_real_), na.rm = T),
-          pod1w = mean(pod1w, na.rm = T),
-          .groups = "drop"
-        ))
+# Thêm đúng 1 dòng này vào cuối:
+save_scenario_results(test1_optimized, test2_optimized, sce_name = "Sce 32")
 
 ### Đóng các session nền sau khi chạy
 plan(sequential)
 ```
+
+```{r}
+# Nối toàn bộ list thành data.frame
+final_performance_df <- dplyr::bind_rows(all_perf_list)
+final_simulation_data_df <- dplyr::bind_rows(all_sim_data_list)
+
+# Xem thử kết quả
+head(final_performance_df)
+
+# XUẤT FILE ĐỂ LƯU TRỮ TRÁNH MẤT DATA:
+# Dữ liệu performance nhẹ nên lưu CSV cho dễ xem
+write.csv(final_performance_df, "Dengue_Perf.csv", row.names = FALSE)
+
+# DỮ LIỆU MÔ PHỎNG (sim_data) thường rất lớn, nên lưu định dạng RDS để nén tốt và load nhanh
+saveRDS(final_simulation_data_df, "Dengue_Cases.rds")
+```
+

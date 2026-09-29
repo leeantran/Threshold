@@ -4,6 +4,9 @@ library(googlesheets4)
 library(googledrive)
 library(DT)
 library(purrr)
+library(ggrepel)
+library(scales)
+library(patchwork)
 
 ## Load data GG Drive
 load_data <- function(url, sheet) {
@@ -84,7 +87,7 @@ run_algos_city <- function(df, target_years) {
     b_curr <- length(hist_years)
     df_target <- df_norm %>% filter(year == yr)
     
-    res_rki1 <- algo.rki1(dp_obj, control = list(range = range_eval, b = b_curr, w = 1, actY = FALSE))
+    res_rki1 <- algo.rki1(dp_obj, control = list(range = range_eval, b = b_curr, w = 1, actY = TRUE))
     res_rki2 <- algo.rki2(dp_obj, control = list(range = range_eval, b = b_curr, w = 1, actY = TRUE))
     
     res_bayes1 <- algo.bayes1(dp_obj, control = list(range = range_eval, b = b_curr, w = 1, actY = TRUE, alpha = 0.05))
