@@ -4,11 +4,11 @@ library(ggrepel)
 # ==========================================
 # 1. LOAD DATA
 # ==========================================
-dengue_sim <- readRDS("Dengue_Cases.rds")
-dengue_perf <- read.csv("Dengue_Perf.csv") %>% mutate(Disease = "Dengue")
+dengue_sim <- readRDS("data/Dengue_Cases.rds")
+dengue_perf <- read.csv("data/Dengue_Perf.csv") %>% mutate(Disease = "Dengue")
 
-hfmd_sim <- readRDS("HFMD_Cases.rds")
-hfmd_perf <- read.csv("HFMD_Perf.csv") %>% mutate(Disease = "HFMD")
+hfmd_sim <- readRDS("data/HFMD_Cases.rds")
+hfmd_perf <- read.csv("data/HFMD_Perf.csv") %>% mutate(Disease = "HFMD")
 
 # ==========================================
 # 2. PLOT 1: SIMULATED CASES (100 Sim Lines per Facet)
